@@ -1,0 +1,28 @@
+#selected-precincts-grid .ag-paging-panel {
+    font-size: 12px;
+    height: auto;
+    min-height: 36px;
+    padding: 4px 6px;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 4px 8px;
+}
+
+/* Hide page-size picker, "1 to 25 of N" summary, and first/last buttons */
+#selected-precincts-grid .ag-paging-panel .ag-paging-page-size,
+#selected-precincts-grid .ag-paging-panel .ag-paging-row-summary-panel,
+#selected-precincts-grid .ag-paging-panel [ref="btFirst"],
+#selected-precincts-grid .ag-paging-panel [ref="btLast"] {
+    display: none;
+}
+
+#selected-precincts-grid .ag-paging-panel .ag-paging-page-summary-panel {
+    margin: 0;
+    gap: 6px;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+#selected-precincts-grid .ag-paging-panel .ag-icon {
+    font-size: 16px;
+}
