@@ -23,6 +23,23 @@ REGISTERED_VOTERS = "Registered Voters"
 GOVERNOR_CONTEST = "Governor (Vote For 1)"
 BECERRA = "Xavier Becerra"
 HILTON = "Steve Hilton"
+MAP_STYLES = (
+    "open-street-map",
+    "white-bg",
+    "carto-voyager",
+    "carto-voyager-nolabels",
+    "carto-positron",
+    "carto-positron-nolabels",
+    "carto-darkmatter",
+    "carto-darkmatter-nolabels",
+    "satellite",
+    "satellite-streets",
+    "basic",
+    "streets",
+    "outdoors",
+    "light",
+    "dark",
+)
 
 
 def source_results_date(source_path):
@@ -274,7 +291,9 @@ def metric_card(label, value):
     )
 
 
-def build_dashboard(page, selected_choice):
+def build_dashboard(page, selected_choice, map_style="open-street-map"):
+    if map_style not in MAP_STYLES:
+        raise ValueError(f"Unsupported map style: {map_style}")
     contest = CONTESTS[page]
     choices, rows = load_contest(page)
     if selected_choice not in choices:
@@ -293,6 +312,7 @@ def build_dashboard(page, selected_choice):
                     "Contest Total Votes": row["Ballots Cast"],
                     "Turnout": row["Turnout"],
                     "Map Value": row["Turnout"],
+                    "Registered Voters": row["Registered Voters"],
                 }
             )
             grid_rows.append({**row, "Precinct": display_precinct_id(row["Precinct"])})
@@ -321,6 +341,7 @@ def build_dashboard(page, selected_choice):
                     "Contest Total Votes": total_votes,
                     "Turnout": row["Turnout"],
                     "Map Value": share,
+                    "Registered Voters": row["Registered Voters"],
                 }
             )
             grid_rows.append({**row, "Precinct": display_precinct_id(row["Precinct"])})
@@ -369,6 +390,7 @@ def build_dashboard(page, selected_choice):
             "Contest Total Votes": pl.Int64,
             "Turnout": pl.Float64,
             "Map Value": pl.Float64,
+            "Registered Voters": pl.Int64,
         },
     ).with_columns(
         pl.when(pl.col("Precinct").str.contains(r"^000\d{4}$"))
@@ -391,8 +413,9 @@ def build_dashboard(page, selected_choice):
         featureidkey="properties.Precinct",
         color="Map Value",
         range_color=color_range,
-        color_continuous_scale="RdYlGn",
-        map_style="open-street-map",
+        color_continuous_scale="BuGn",
+        opacity=0.5,
+        map_style=map_style,
         center=center,
         zoom=zoom,
         custom_data=[
@@ -402,16 +425,24 @@ def build_dashboard(page, selected_choice):
             "Contest Total Votes",
             "Turnout",
             "Display Precinct",
+            "Registered Voters",
         ],
     )
     figure.update_traces(
         hovertemplate=(
             "<b>Precinct %{customdata[5]}</b><br>"
-            "%{customdata[0]}: %{customdata[1]:,.0f} votes<br>"
-            "Vote percentage: %{customdata[2]:.1f}%<br>"
-            "Total precinct votes: %{customdata[3]:,.0f}<br>"
-            "Precinct turnout: %{customdata[4]:.1f}%"
-            "<extra></extra>"
+            "Ballots Cast: %{customdata[1]:,.0f}<br>"
+            "Registered Voters: %{customdata[6]:,.0f}<br>"
+            "Turnout: %{customdata[4]:.1f}%<extra></extra>"
+            if contest == REGISTERED_VOTERS
+            else (
+                "<b>Precinct %{customdata[5]}</b><br>"
+                "%{customdata[0]}: %{customdata[1]:,.0f} votes<br>"
+                "Precinct votes: %{customdata[3]:,.0f}<br>"
+                "Vote percentage: %{customdata[2]:.1f}%<br>"
+                "Precinct turnout: %{customdata[4]:.1f}%"
+                "<extra></extra>"
+            )
         )
     )
     label_ids = [
@@ -488,6 +519,7 @@ def build_partisanship_scatter(page, selected_choice, governor_candidate, label,
     vote_percentages = []
     governor_shares = []
     ballot_counts = []
+    choice_counts = []
     hover_data = []
     for row in rows:
         governor = governor_by_precinct.get(row["Precinct"])
@@ -518,6 +550,7 @@ def build_partisanship_scatter(page, selected_choice, governor_candidate, label,
         vote_percentages.append(percentage)
         governor_shares.append(governor_votes / governor["Contest Total Votes"] * 100)
         ballot_counts.append(ballots)
+        choice_counts.append(choice_votes)
         becerra_votes = governor[BECERRA]
         blue_share = (
             f"{becerra_votes / governor['Contest Total Votes'] * 100:.1f}%"
@@ -565,7 +598,24 @@ def build_partisanship_scatter(page, selected_choice, governor_candidate, label,
         hovertemplate=hovertemplate,
     ))
     if len(vote_percentages) >= 2 and min(vote_percentages) != max(vote_percentages):
-        regression = linregress(vote_percentages, governor_shares)
+        vote_data = (
+            pl.DataFrame(
+                {
+                    "vote_percentage": vote_percentages,
+                    "governor_share": governor_shares,
+                    "votes": choice_counts,
+                }
+            )
+            .select(
+                pl.col("vote_percentage").repeat_by("votes"),
+                pl.col("governor_share").repeat_by("votes"),
+            )
+            .explode("vote_percentage", "governor_share")
+        )
+        regression = linregress(
+            vote_data["vote_percentage"].to_numpy(),
+            vote_data["governor_share"].to_numpy(),
+        )
         line_x = [min(vote_percentages), max(vote_percentages)]
         figure.add_trace(go.Scatter(
             x=line_x,
@@ -652,7 +702,7 @@ app.layout = html.Div(
                 ),
                 html.Div(
                     [
-                        html.Label("Color map by", htmlFor="map-choice"),
+                        html.Label("Candidate", htmlFor="map-choice"),
                         dcc.Dropdown(
                             id="map-choice",
                             options=[
@@ -660,6 +710,21 @@ app.layout = html.Div(
                                 for choice in default_choices
                             ],
                             value=default_choices[0],
+                            clearable=False,
+                        ),
+                    ],
+                    style={"flex": "1", "minWidth": "220px"},
+                ),
+                html.Div(
+                    [
+                        html.Label("Map style", htmlFor="map-style"),
+                        dcc.Dropdown(
+                            id="map-style",
+                            options=[
+                                {"label": style, "value": style}
+                                for style in MAP_STYLES
+                            ],
+                            value='carto-positron',
                             clearable=False,
                         ),
                     ],
@@ -707,6 +772,11 @@ app.layout = html.Div(
             columnSize="responsiveSizeToFit",
             style={"height": "520px", "width": "100%"},
         ),
+        html.P(
+            "Election results and precinct shape files provided by Santa Clara County "
+            "Registrar of Voters. This dashboard created by Mike Purtell.",
+            style={"color": "#475569", "margin": "24px 0 0"},
+        ),
     ],
     style={
         "fontFamily": "Arial, sans-serif",
@@ -739,9 +809,10 @@ def update_map_choices(page):
     Output("results-grid", "rowData"),
     Input("contest-selector", "value"),
     Input("map-choice", "value"),
+    Input("map-style", "value"),
 )
-def update_dashboard(page, selected_choice):
-    return build_dashboard(page, selected_choice)
+def update_dashboard(page, selected_choice, map_style):
+    return build_dashboard(page, selected_choice, map_style)
 
 
 @app.callback(
