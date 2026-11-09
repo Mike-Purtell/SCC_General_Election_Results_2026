@@ -22,7 +22,11 @@ PRECINCT_SHAPEFILE = ROOT / "Precinct_Boundaries" / "Precinct_Boundaries.shp"
 REGISTERED_VOTERS = "Registered Voters"
 GOVERNOR_CONTEST = "Governor (Vote For 1)"
 BECERRA = "Xavier Becerra"
-HILTON = "Steve Hilton"
+UNPROCESSED_BALLOTS = 186_550
+UNPROCESSED_BALLOTS_UPDATED = "November 8, 2026 at 5:00 p.m."
+UNPROCESSED_BALLOTS_URL = (
+    "https://vote.santaclaracounty.gov/elections/unprocessed-ballot-estimates"
+)
 MAP_STYLES = (
     "open-street-map",
     "white-bg",
@@ -502,7 +506,7 @@ def scatter_axis_range(values):
     return [minimum - margin, maximum + margin]
 
 
-def build_partisanship_scatter(page, selected_choice, governor_candidate, label, color):
+def build_partisanship_scatter(page, selected_choice, governor_candidate, color):
     contest = CONTESTS[page]
     choices, rows = load_contest(page)
     if selected_choice not in choices:
@@ -574,13 +578,13 @@ def build_partisanship_scatter(page, selected_choice, governor_candidate, label,
         f"{x_title}: %{{x:.1f}}%<br>"
         f"{selected_choice} votes: %{{customdata[0]:,.0f}}<br>"
         "Contest votes cast: %{customdata[1]:,.0f}<br>"
-        "Precinct blueness: %{customdata[2]}<extra></extra>"
+        "Xavier Becerra precinct vote share: %{customdata[2]}<extra></extra>"
         if contest != REGISTERED_VOTERS
         else (
             "<b>Precinct %{customdata[3]}</b><br>"
             "Voter turnout: %{x:.1f}%<br>"
             "Ballots cast: %{customdata[0]:,.0f}<br>"
-            "Precinct blueness: %{customdata[2]}<extra></extra>"
+            "Xavier Becerra precinct vote share: %{customdata[2]}<extra></extra>"
         )
     )
     figure = go.Figure(go.Scatter(
@@ -645,9 +649,9 @@ def build_partisanship_scatter(page, selected_choice, governor_candidate, label,
         subtitle = "Best fit unavailable: at least two distinct x values required"
     figure.update_layout(
         title={
-            "text": f"{display_contest_name(contest)} — {label}",
+            "text": f"{display_contest_name(contest)} — Correlation with X. Becerra",
             "subtitle": {
-                "text": f"{selected_choice} and precinct {label.lower()} | {subtitle}"
+                "text": f"{selected_choice} vs. Xavier Becerra precinct vote share | {subtitle}"
             },
         },
         xaxis={
@@ -656,7 +660,7 @@ def build_partisanship_scatter(page, selected_choice, governor_candidate, label,
             "ticksuffix": "%",
         },
         yaxis={
-            "title": f"Precinct {label}",
+            "title": "Xavier Becerra Precinct Vote Share",
             "range": scatter_axis_range(governor_shares),
             "ticksuffix": "%",
         },
@@ -668,6 +672,93 @@ def build_partisanship_scatter(page, selected_choice, governor_candidate, label,
     return figure
 
 
+@lru_cache(maxsize=32)
+def load_vote_type_totals(page):
+    choices, _ = load_contest(page)
+    frame = (
+        pl.read_excel(SOURCE_DATA, sheet_name=page, read_options={"header_row": 2})
+        .filter(pl.col("Precinct") != "Total:")
+    )
+    total_columns = [
+        column for column in frame.columns
+        if column == "Total Votes" or column.startswith("Total Votes_")
+    ]
+    if len(total_columns) != len(choices):
+        raise ValueError(f"Vote columns do not match choices for contest {page}")
+
+    totals = []
+    for total_column in total_columns:
+        suffix = total_column[len("Total Votes"):]
+        columns = [f"Vote By Mail{suffix}", f"In Person{suffix}", total_column]
+        if any(column not in frame.columns for column in columns):
+            raise ValueError(f"Missing vote-type columns for {total_column} in contest {page}")
+        totals.append(tuple(frame[column].sum() or 0 for column in columns))
+    return choices, tuple(totals)
+
+
+def build_vote_type_chart(page):
+    contest = CONTESTS[page]
+    figure = go.Figure()
+    if contest == REGISTERED_VOTERS:
+        figure.add_annotation(
+            text="Vote-type counts are not available for the registered voters view.",
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+        )
+        figure.update_xaxes(visible=False)
+        figure.update_yaxes(visible=False)
+    else:
+        choices, totals = load_vote_type_totals(page)
+        contest_total = sum(total[2] for total in totals)
+        percentages = []
+        for mail, in_person, total in totals:
+            if contest_total:
+                total_tenths = round(total * 1000 / contest_total)
+                mail_tenths = round(mail * 1000 / contest_total)
+                percentages.append((
+                    f"{mail_tenths / 10:.1f}%",
+                    f"{(total_tenths - mail_tenths) / 10:.1f}%",
+                    f"{total_tenths / 10:.1f}%",
+                ))
+            else:
+                percentages.append(("N/A", "N/A", "N/A"))
+        for index, (name, color) in enumerate((
+            ("By mail", "#2563eb"),
+            ("In person", "#16a34a"),
+            ("Total", "#64748b"),
+        )):
+            counts = [total[index] for total in totals]
+            figure.add_trace(go.Bar(
+                name=name,
+                x=choices,
+                y=counts,
+                text=[percentage[index] for percentage in percentages],
+                textposition="auto",
+                marker_color=color,
+                hovertemplate=(
+                    "<b>%{x}</b><br>"
+                    f"{name}: %{{y:,.0f}} votes<br>"
+                    "Share of contest votes: %{text}<extra></extra>"
+                ),
+            ))
+        figure.update_yaxes(title="Vote count", rangemode="tozero")
+    figure.update_layout(
+        title={
+            "text": f"{display_contest_name(contest)} — Votes by type",
+            "subtitle": {"text": "Percentages are shares of total contest votes"},
+        },
+        barmode="group",
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        margin={"l": 60, "r": 30, "t": 80, "b": 55},
+        legend={"orientation": "v", "x": 1, "xanchor": "right", "y": 1, "yanchor": "top"},
+    )
+    return figure
+
+
 default_page = CONTEST_PAGES.get("Governor (Vote For 1)", next(iter(CONTESTS)))
 default_choices, _ = load_contest(default_page)
 
@@ -675,12 +766,22 @@ app = dash.Dash(__name__)
 app.title = "Santa Clara County Election Results"
 app.layout = html.Div(
     [
-        html.H1("Santa Clara County Election Results", style={"margin": "0 0 6px"}),
+        html.H1(
+            "Santa Clara County General Election Results, November 3 2026", 
+            style={"margin": "0 0 6px"}
+        ),
         html.P(
-            "Explore precinct-level results, vote share, and turnout. "
-            "These election results were released by the Santa Clara County "
-            f"Registrar of Voters on {results_date_label} and are partial; "
-            "counting is still underway.",
+            [
+                "Explore precinct-level results, vote share, and turnout. "
+                "These election results were released by the Santa Clara County "
+                f"Registrar of Voters on {results_date_label} and are partial; "
+                "counting is still underway. ",
+                html.A(
+                    f"Estimated unprocessed ballots: {format_count(UNPROCESSED_BALLOTS)}",
+                    href=UNPROCESSED_BALLOTS_URL,
+                ),
+                f" (as of {UNPROCESSED_BALLOTS_UPDATED}; estimate subject to change).",
+            ],
             style={"color": "#475569", "margin": "0 0 20px"},
         ),
         html.Div(
@@ -751,7 +852,7 @@ app.layout = html.Div(
                     style={"flex": "1 1 420px", "minWidth": 0},
                 ),
                 dcc.Graph(
-                    id="redness-scatter",
+                    id="vote-type-chart",
                     config={"displayModeBar": True},
                     style={"flex": "1 1 420px", "minWidth": 0},
                 ),
@@ -817,15 +918,19 @@ def update_dashboard(page, selected_choice, map_style):
 
 @app.callback(
     Output("blueness-scatter", "figure"),
-    Output("redness-scatter", "figure"),
     Input("contest-selector", "value"),
     Input("map-choice", "value"),
 )
-def update_partisanship_scatters(page, selected_choice):
-    return (
-        build_partisanship_scatter(page, selected_choice, BECERRA, "Blueness", "#2563eb"),
-        build_partisanship_scatter(page, selected_choice, HILTON, "Redness", "#dc2626"),
-    )
+def update_blueness_scatter(page, selected_choice):
+    return build_partisanship_scatter(page, selected_choice, BECERRA, "#2563eb")
+
+
+@app.callback(
+    Output("vote-type-chart", "figure"),
+    Input("contest-selector", "value"),
+)
+def update_vote_type_chart(page):
+    return build_vote_type_chart(page)
 
 
 if __name__ == "__main__":
