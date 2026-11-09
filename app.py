@@ -17,7 +17,7 @@ from shapely.geometry import shape
 
 
 ROOT = Path(__file__).resolve().parent
-SOURCE_DATA = ROOT / "detail_2026_11_07.xlsx"
+SOURCE_DATA = ROOT / "detail_2026_11_08.xlsx"
 PRECINCT_SHAPEFILE = ROOT / "Precinct_Boundaries" / "Precinct_Boundaries.shp"
 REGISTERED_VOTERS = "Registered Voters"
 GOVERNOR_CONTEST = "Governor (Vote For 1)"
