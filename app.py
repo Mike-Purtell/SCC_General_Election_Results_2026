@@ -17,13 +17,13 @@ from shapely.geometry import shape
 
 
 ROOT = Path(__file__).resolve().parent
-SOURCE_DATA = ROOT / "detail_2026_11_08.xlsx"
+SOURCE_DATA = ROOT / "detail_2026_11_10.xlsx"
 PRECINCT_SHAPEFILE = ROOT / "Precinct_Boundaries" / "Precinct_Boundaries.shp"
 REGISTERED_VOTERS = "Registered Voters"
 GOVERNOR_CONTEST = "Governor (Vote For 1)"
 BECERRA = "Xavier Becerra"
-UNPROCESSED_BALLOTS = 186_550
-UNPROCESSED_BALLOTS_UPDATED = "November 8, 2026 at 5:00 p.m."
+UNPROCESSED_BALLOTS = 67_000  # 136_550
+UNPROCESSED_BALLOTS_UPDATED = "November 10, 2026"
 UNPROCESSED_BALLOTS_URL = (
     "https://vote.santaclaracounty.gov/elections/unprocessed-ballot-estimates"
 )
