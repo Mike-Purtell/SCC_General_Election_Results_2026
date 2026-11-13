@@ -21,7 +21,7 @@ Contest names omit the default “Vote For 0” and “Vote For 1” suffixes; h
 
 Drag the map to pan. The map sends only the selected contest's precinct boundaries to keep updates responsive; changing contests resets the view to the new precincts.
 
-The map uses a sequential blue-green color scale, with darker shades indicating higher shares or turnout. It spans the 10th to 90th percentiles of displayed precinct shares (or turnout for the registered voters view). Values outside this range use the endpoint colors; hover values remain unchanged.
+The map uses a yellow-to-green color scale, with yellow indicating lower shares or turnout and green indicating higher values. It spans the 10th to 90th percentiles of displayed precinct shares (or turnout for the registered voters view). Values outside this range use the endpoint colors; hover values remain unchanged.
 
 Contest results exclude precincts with zero total contest votes from the map, percentile calculation, and grid. The registered voters view continues to show all precincts.
 
@@ -29,6 +29,8 @@ The correlation with Governor-Elect Xavier Becerra scatter plot shows one point 
 
 The scatter plot includes a linear best-fit line and displays its slope, y-intercept, and Pearson correlation coefficient (r). For the fit, each precinct contributes once per vote for the selected candidate or response; in the registered voters view, it contributes once per ballot cast. Each plotted point still represents one precinct. The fit requires at least two distinct x values; otherwise the plot reports that it is unavailable.
 
+The precinct-density contour chart uses the same precincts and axis measures as the scatter plot. Each axis is initially zoomed to its 5th–95th percentile range; outliers remain in the data. It uses the map's yellow-to-green color scale to show the number of precincts in each region, with each precinct counted once.
+
 The grouped bar chart shows countywide by-mail, in-person, and total votes for each candidate or response. All percentages use total contest votes as their denominator, so each choice's by-mail and in-person shares add up to its total share. Displayed percentages are rounded to one decimal place, with the in-person share adjusted when necessary so the displayed values add up. A contest with no votes shows N/A. The registered voters sheet has no vote-type breakdown, so the chart displays a message instead.
 
-The app reads `detail_2026_11_08.xlsx` and the shapefile in `Precinct_Boundaries`. The results date shown on the dashboard comes from the source filename, which must end in `YYYY_MM_DD` before the extension. Results are marked partial because counting is still underway.
+The app reads `detail_2026_11_12.xlsx` and the `E148_Consolidated_Precinct` layer in `E148_Consolidated_Precinct.gdb`. The results date shown on the dashboard comes from the source filename, which must end in `YYYY_MM_DD` before the extension. Results are marked partial because counting is still underway.

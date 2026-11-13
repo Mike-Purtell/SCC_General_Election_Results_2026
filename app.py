@@ -10,20 +10,24 @@ from dash import Input, Output, dcc, html
 import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
-import shapefile
+from pyogrio.raw import read as read_geodatabase_layer
 from pyproj import Transformer
 from scipy.stats import linregress
 from shapely.geometry import shape
+from shapely.wkb import loads as load_wkb
 
 
 ROOT = Path(__file__).resolve().parent
-SOURCE_DATA = ROOT / "detail_2026_11_11.xlsx"
-PRECINCT_SHAPEFILE = ROOT / "Precinct_Boundaries" / "Precinct_Boundaries.shp"
+SOURCE_DATA = ROOT / "detail_2026_11_12.xlsx"
+PRECINCT_GEODATABASE = ROOT / "E148_Consolidated_Precinct.gdb"
+PRECINCT_LAYER = "E148_Consolidated_Precinct"
+PRECINCT_ID_FIELD = "VPCT"
+PRECINCT_COLOR_SCALE = ["#ffff00", "#008000"]
 REGISTERED_VOTERS = "Registered Voters"
 GOVERNOR_CONTEST = "Governor (Vote For 1)"
 BECERRA = "Xavier Becerra"
-UNPROCESSED_BALLOTS = 23_900 # 67_000  # 136_550
-UNPROCESSED_BALLOTS_UPDATED = "November 11, 2026"
+UNPROCESSED_BALLOTS = 11_900 # 23_900 # 67_000  # 136_550
+UNPROCESSED_BALLOTS_UPDATED = "November 12, 2026"
 UNPROCESSED_BALLOTS_URL = (
     "https://vote.santaclaracounty.gov/elections/unprocessed-ballot-estimates"
 )
@@ -130,17 +134,20 @@ def project_coordinates(coordinates, transformer):
 
 
 def load_precinct_geojson():
-    transformer = Transformer.from_crs("EPSG:2227", "EPSG:4326", always_xy=True)
-    reader = shapefile.Reader(str(PRECINCT_SHAPEFILE), encoding="utf-8")
-    field_names = [field[0] for field in reader.fields[1:]]
+    metadata, _, geometries, fields = read_geodatabase_layer(
+        str(PRECINCT_GEODATABASE),
+        layer=PRECINCT_LAYER,
+        columns=[PRECINCT_ID_FIELD],
+    )
+    transformer = Transformer.from_crs(
+        metadata["crs"], "EPSG:4326", always_xy=True
+    )
     features = []
 
-    for shape_record in reader.iterShapeRecords():
-        geometry = shape_record.shape.__geo_interface__
-        precinct = precinct_id(
-            dict(zip(field_names, shape_record.record))["Precinct"]
-        )
-        polygon = shape(geometry)
+    for precinct_value, geometry_wkb in zip(fields[0], geometries, strict=True):
+        precinct = precinct_id(precinct_value)
+        polygon = load_wkb(geometry_wkb)
+        geometry = polygon.__geo_interface__
         if polygon.geom_type == "MultiPolygon":
             polygon = max(polygon.geoms, key=lambda part: part.area)
         point = polygon.representative_point()
@@ -417,7 +424,7 @@ def build_dashboard(page, selected_choice, map_style="open-street-map"):
         featureidkey="properties.Precinct",
         color="Map Value",
         range_color=color_range,
-        color_continuous_scale="BuGn",
+        color_continuous_scale=PRECINCT_COLOR_SCALE,
         opacity=0.5,
         map_style=map_style,
         center=center,
@@ -506,7 +513,18 @@ def scatter_axis_range(values):
     return [minimum - margin, maximum + margin]
 
 
-def build_partisanship_scatter(page, selected_choice, governor_candidate, color):
+def contour_axis_range(values):
+    if not values:
+        return scatter_axis_range(values)
+    series = pl.Series(values)
+    lower = series.quantile(0.05, interpolation="linear")
+    upper = series.quantile(0.95, interpolation="linear")
+    if lower == upper:
+        return scatter_axis_range([lower])
+    return [lower, upper]
+
+
+def load_partisanship_data(page, selected_choice, governor_candidate):
     contest = CONTESTS[page]
     choices, rows = load_contest(page)
     if selected_choice not in choices:
@@ -568,6 +586,27 @@ def build_partisanship_scatter(page, selected_choice, governor_candidate, color)
             display_precinct_id(row["Precinct"]),
         ])
 
+    return (
+        contest,
+        selected_choice,
+        vote_percentages,
+        governor_shares,
+        ballot_counts,
+        choice_counts,
+        hover_data,
+    )
+
+
+def build_partisanship_scatter(page, selected_choice, governor_candidate, color):
+    (
+        contest,
+        selected_choice,
+        vote_percentages,
+        governor_shares,
+        ballot_counts,
+        choice_counts,
+        hover_data,
+    ) = load_partisanship_data(page, selected_choice, governor_candidate)
     x_title = (
         "Voter turnout"
         if contest == REGISTERED_VOTERS
@@ -667,6 +706,48 @@ def build_partisanship_scatter(page, selected_choice, governor_candidate, color)
         paper_bgcolor="white",
         plot_bgcolor="white",
         showlegend=False,
+        margin={"l": 60, "r": 30, "t": 80, "b": 55},
+    )
+    return figure
+
+
+def build_partisanship_contour(page, selected_choice, governor_candidate):
+    contest, selected_choice, x_values, y_values, _, _, _ = load_partisanship_data(
+        page, selected_choice, governor_candidate
+    )
+    x_title = (
+        "Voter turnout"
+        if contest == REGISTERED_VOTERS
+        else f"{selected_choice} Precinct Vote Share"
+    )
+    figure = go.Figure(go.Histogram2dContour(
+        x=x_values,
+        y=y_values,
+        nbinsx=30,
+        nbinsy=30,
+        colorscale=PRECINCT_COLOR_SCALE,
+        contours={"coloring": "fill", "showlines": True},
+        colorbar={"title": "Precinct count"},
+        hovertemplate=(
+            f"{x_title}: %{{x:.1f}}%<br>"
+            "Xavier Becerra precinct vote share: %{y:.1f}%<br>"
+            "Precincts: %{z}<extra></extra>"
+        ),
+    ))
+    figure.update_layout(
+        title=f"{display_contest_name(contest)} — Precinct density",
+        xaxis={
+            "title": x_title,
+            "range": contour_axis_range(x_values),
+            "ticksuffix": "%",
+        },
+        yaxis={
+            "title": "Xavier Becerra Precinct Vote Share",
+            "range": contour_axis_range(y_values),
+            "ticksuffix": "%",
+        },
+        paper_bgcolor="white",
+        plot_bgcolor="white",
         margin={"l": 60, "r": 30, "t": 80, "b": 55},
     )
     return figure
@@ -852,6 +933,11 @@ app.layout = html.Div(
                     style={"flex": "1 1 420px", "minWidth": 0},
                 ),
                 dcc.Graph(
+                    id="blueness-contour",
+                    config={"displayModeBar": True},
+                    style={"flex": "1 1 420px", "minWidth": 0},
+                ),
+                dcc.Graph(
                     id="vote-type-chart",
                     config={"displayModeBar": True},
                     style={"flex": "1 1 420px", "minWidth": 0},
@@ -923,6 +1009,15 @@ def update_dashboard(page, selected_choice, map_style):
 )
 def update_blueness_scatter(page, selected_choice):
     return build_partisanship_scatter(page, selected_choice, BECERRA, "#2563eb")
+
+
+@app.callback(
+    Output("blueness-contour", "figure"),
+    Input("contest-selector", "value"),
+    Input("map-choice", "value"),
+)
+def update_blueness_contour(page, selected_choice):
+    return build_partisanship_contour(page, selected_choice, BECERRA)
 
 
 @app.callback(
