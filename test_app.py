@@ -87,6 +87,37 @@ class PrecinctCrossReferenceTests(unittest.TestCase):
                         app.read_precinct_cross_reference("example.pdf")
 
 
+class DashboardTests(unittest.TestCase):
+    def test_results_columns_are_equal_and_80_percent_width(self):
+        _, _, column_defs, _ = app.build_dashboard(
+            app.default_page, app.default_choices[0]
+        )
+        self.assertTrue(all(definition["width"] == 200 for definition in column_defs))
+        results_grid = next(
+            component
+            for component in app.app.layout._traverse_ids()
+            if component.id == "results-grid"
+        )
+        self.assertEqual(results_grid.style["width"], "80%")
+        self.assertLess(results_grid.defaultColDef["minWidth"], 120)
+
+    def test_long_column_headers_enable_wrapping(self):
+        _, _, column_defs, _ = app.build_dashboard(
+            app.default_page, app.default_choices[0]
+        )
+        definitions = {definition["field"]: definition for definition in column_defs}
+        expected_headers = {
+            "Precinct": "Consolidated Voting Precinct",
+            "Registered Voters": "Registered Voters",
+            "Contest Total Votes": "Contest Total Votes",
+            "Ballots Cast": "Ballots Cast",
+        }
+        for column, header_name in expected_headers.items():
+            self.assertEqual(definitions[column]["headerName"], header_name)
+            self.assertTrue(definitions[column]["wrapHeaderText"])
+            self.assertTrue(definitions[column]["autoHeaderHeight"])
+
+
 class PrecinctDensityTests(unittest.TestCase):
     def test_density_scale_starts_at_zero_and_spans_bin_counts(self):
         data = ("Example", "Choice", [10, 10, 20], [1, 1, 2], [], [], [])
