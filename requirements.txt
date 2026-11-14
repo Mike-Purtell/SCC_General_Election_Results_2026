@@ -3,6 +3,7 @@ dash-ag-grid>=35.3
 fastexcel
 plotly>=7.1
 polars>=2.1
+pypdf
 pyogrio>=0.13
 pyproj>=3.8
 scipy

@@ -10,6 +10,7 @@ from dash import Input, Output, dcc, html
 import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
+from pypdf import PdfReader
 from pyogrio.raw import read as read_geodatabase_layer
 from pyproj import Transformer
 from scipy.stats import linregress
@@ -18,7 +19,9 @@ from shapely.wkb import loads as load_wkb
 
 
 ROOT = Path(__file__).resolve().parent
-SOURCE_DATA = ROOT / "detail_2026_11_12.xlsx"
+SOURCE_DATA = ROOT / "detail_2026_11_13.xlsx"
+PRECINCT_CROSS_REFERENCE = ROOT / "e148 wmr008_votabsregpctxref.pdf"
+PRECINCT_CROSS_REFERENCE_PARQUET = ROOT / "precinct_cross_reference.parquet"
 PRECINCT_GEODATABASE = ROOT / "E148_Consolidated_Precinct.gdb"
 PRECINCT_LAYER = "E148_Consolidated_Precinct"
 PRECINCT_ID_FIELD = "VPCT"
@@ -26,8 +29,8 @@ PRECINCT_COLOR_SCALE = ["#ffff00", "#008000"]
 REGISTERED_VOTERS = "Registered Voters"
 GOVERNOR_CONTEST = "Governor (Vote For 1)"
 BECERRA = "Xavier Becerra"
-UNPROCESSED_BALLOTS = 11_900 # 23_900 # 67_000  # 136_550
-UNPROCESSED_BALLOTS_UPDATED = "November 12, 2026"
+UNPROCESSED_BALLOTS = 8_700 # 11_900 # 23_900 # 67_000  # 136_550
+UNPROCESSED_BALLOTS_UPDATED = "November 13, 2026"
 UNPROCESSED_BALLOTS_URL = (
     "https://vote.santaclaracounty.gov/elections/unprocessed-ballot-estimates"
 )
@@ -69,6 +72,53 @@ def precinct_id(value):
 
 def display_precinct_id(value):
     return value[3:] if len(value) == 7 and value.startswith("000") else value
+
+
+def read_precinct_cross_reference(path):
+    row_pattern = re.compile(
+        r"^\s*\d+(?:(\d{7})\s+- PCT (\d+)\s+|\s+)(\d{7}) PCT (\d+)\s*$"
+    )
+    totals_pattern = re.compile(r"Regular Pcts:\s*([\d,]+)\s*Total Voting Pcts:\s*([\d,]+)")
+    rows = []
+    voting_precinct = None
+    expected_totals = None
+    for page in PdfReader(path).pages:
+        for line in page.extract_text().splitlines():
+            match = row_pattern.fullmatch(line)
+            if match:
+                voting_id, voting_label, regular_id, regular_label = match.groups()
+                if voting_id:
+                    if int(voting_id) != int(voting_label):
+                        raise ValueError(f"Voting precinct ID mismatch: {line}")
+                    voting_precinct = voting_id
+                if voting_precinct is None or int(regular_id) != int(regular_label):
+                    raise ValueError(f"Invalid precinct cross-reference row: {line}")
+                rows.append(
+                    {
+                        "Regular Precinct": display_precinct_id(regular_id),
+                        "Voting Precinct": display_precinct_id(voting_precinct),
+                    }
+                )
+            elif " PCT " in line and not line.startswith("EWMR008"):
+                raise ValueError(f"Unrecognized precinct cross-reference row: {line}")
+            else:
+                totals = totals_pattern.search(line)
+                if totals:
+                    expected_totals = tuple(int(value.replace(",", "")) for value in totals.groups())
+
+    regular_ids = {row["Regular Precinct"] for row in rows}
+    voting_ids = {row["Voting Precinct"] for row in rows}
+    if expected_totals != (len(rows), len(voting_ids)) or len(regular_ids) != len(rows):
+        raise ValueError(f"Precinct cross-reference totals do not match {path}")
+    return pl.DataFrame(rows, schema={"Regular Precinct": pl.String, "Voting Precinct": pl.String})
+
+
+def load_precinct_cross_reference(pdf_path, parquet_path):
+    if parquet_path.exists():
+        return pl.read_parquet(parquet_path)
+    frame = read_precinct_cross_reference(pdf_path)
+    frame.write_parquet(parquet_path)
+    return frame
 
 
 def display_contest_name(contest):
@@ -441,13 +491,13 @@ def build_dashboard(page, selected_choice, map_style="open-street-map"):
     )
     figure.update_traces(
         hovertemplate=(
-            "<b>Precinct %{customdata[5]}</b><br>"
+            "<b>Consolidated Precinct %{customdata[5]}</b><br>"
             "Ballots Cast: %{customdata[1]:,.0f}<br>"
             "Registered Voters: %{customdata[6]:,.0f}<br>"
             "Turnout: %{customdata[4]:.1f}%<extra></extra>"
             if contest == REGISTERED_VOTERS
             else (
-                "<b>Precinct %{customdata[5]}</b><br>"
+                "<b>Consolidated Precinct %{customdata[5]}</b><br>"
                 "%{customdata[0]}: %{customdata[1]:,.0f} votes<br>"
                 "Precinct votes: %{customdata[3]:,.0f}<br>"
                 "Vote percentage: %{customdata[2]:.1f}%<br>"
@@ -513,7 +563,7 @@ def scatter_axis_range(values):
     return [minimum - margin, maximum + margin]
 
 
-def contour_axis_range(values):
+def density_axis_range(values):
     if not values:
         return scatter_axis_range(values)
     series = pl.Series(values)
@@ -711,7 +761,7 @@ def build_partisanship_scatter(page, selected_choice, governor_candidate, color)
     return figure
 
 
-def build_partisanship_contour(page, selected_choice, governor_candidate):
+def build_partisanship_heatmap(page, selected_choice, governor_candidate):
     contest, selected_choice, x_values, y_values, _, _, _ = load_partisanship_data(
         page, selected_choice, governor_candidate
     )
@@ -720,13 +770,22 @@ def build_partisanship_contour(page, selected_choice, governor_candidate):
         if contest == REGISTERED_VOTERS
         else f"{selected_choice} Precinct Vote Share"
     )
-    figure = go.Figure(go.Histogram2dContour(
+    x_bins = density_bins(x_values)
+    y_bins = density_bins(y_values)
+    bin_counts = {}
+    for x_value, y_value in zip(x_values, y_values, strict=True):
+        x_index = int((x_value - x_bins["start"]) / x_bins["size"])
+        y_index = int((y_value - y_bins["start"]) / y_bins["size"])
+        key = (x_index, y_index)
+        bin_counts[key] = bin_counts.get(key, 0) + 1
+    figure = go.Figure(go.Histogram2d(
         x=x_values,
         y=y_values,
-        nbinsx=30,
-        nbinsy=30,
-        colorscale=PRECINCT_COLOR_SCALE,
-        contours={"coloring": "fill", "showlines": True},
+        xbins=x_bins,
+        ybins=y_bins,
+        colorscale=["#ffffff", "#008000"],
+        zmin=0,
+        zmax=max(bin_counts.values(), default=1),
         colorbar={"title": "Precinct count"},
         hovertemplate=(
             f"{x_title}: %{{x:.1f}}%<br>"
@@ -738,12 +797,12 @@ def build_partisanship_contour(page, selected_choice, governor_candidate):
         title=f"{display_contest_name(contest)} — Precinct density",
         xaxis={
             "title": x_title,
-            "range": contour_axis_range(x_values),
+            "range": density_axis_range(x_values),
             "ticksuffix": "%",
         },
         yaxis={
             "title": "Xavier Becerra Precinct Vote Share",
-            "range": contour_axis_range(y_values),
+            "range": density_axis_range(y_values),
             "ticksuffix": "%",
         },
         paper_bgcolor="white",
@@ -751,6 +810,18 @@ def build_partisanship_contour(page, selected_choice, governor_candidate):
         margin={"l": 60, "r": 30, "t": 80, "b": 55},
     )
     return figure
+
+
+def density_bins(values):
+    if not values:
+        return {"start": 0, "end": 1, "size": 1 / 30}
+    minimum, maximum = min(values), max(values)
+    if minimum == maximum:
+        minimum -= 0.5
+        maximum += 0.5
+    # Keep the largest value inside the final bin rather than on its upper edge.
+    size = (maximum - minimum) / 29.999999
+    return {"start": minimum, "end": minimum + 30 * size, "size": size}
 
 
 @lru_cache(maxsize=32)
@@ -840,8 +911,87 @@ def build_vote_type_chart(page):
     return figure
 
 
+def build_precinct_distribution(page, selected_choice):
+    contest = CONTESTS[page]
+    choices, rows = load_contest(page)
+    if selected_choice not in choices:
+        selected_choice = choices[0]
+
+    if contest == REGISTERED_VOTERS:
+        values = [row["Turnout"] for row in rows if row["Registered Voters"] > 0]
+        county_share = COUNTY_TURNOUT if COUNTY_REGISTERED else None
+        x_title = "Precinct voter turnout"
+        line_label = "Turnout"
+    else:
+        values = [
+            (row.get(selected_choice) or 0) / row["Contest Total Votes"] * 100
+            for row in rows
+            if row["Contest Total Votes"] > 0
+        ]
+        total_votes = sum(row["Contest Total Votes"] for row in rows)
+        county_share = (
+            sum(row.get(selected_choice) or 0 for row in rows) / total_votes * 100
+            if total_votes
+            else None
+        )
+        x_title = f"{selected_choice} precinct vote share"
+        line_label = "Vote share"
+
+    figure = go.Figure()
+    if values:
+        figure.add_trace(go.Histogram(
+            x=values,
+            xbins={"start": 0, "size": 5},
+            marker_color='#bacaba',
+            marker_line={"color": "#808080", "width": 1},
+            hovertemplate=f"{x_title}: %{{x}}%<br>Precincts: %{{y}}<extra></extra>",
+        ))
+    else:
+        figure.add_annotation(
+            text="No precinct data available for this distribution.",
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+        )
+    if county_share is not None:
+        figure.add_vline(
+            x=county_share,
+            line_dash="dash",
+            line_color="#2563eb",
+            annotation_text=f"{line_label}: {county_share:.1f}%",
+            annotation_position="top right",
+        )
+    figure.update_layout(
+        title=f"{display_contest_name(contest)} — Precinct distribution",
+        bargap=0,
+        xaxis={"title": x_title, "ticksuffix": "%"},
+        yaxis={"title": "Number of precincts", "rangemode": "tozero"},
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        margin={"l": 60, "r": 30, "t": 80, "b": 55},
+        showlegend=False,
+    )
+    return figure
+
+
 default_page = CONTEST_PAGES.get("Governor (Vote For 1)", next(iter(CONTESTS)))
 default_choices, _ = load_contest(default_page)
+precinct_cross_reference = load_precinct_cross_reference(
+    PRECINCT_CROSS_REFERENCE, PRECINCT_CROSS_REFERENCE_PARQUET
+)
+
+
+def contest_cross_reference(page):
+    _, rows = load_contest(page)
+    precincts = [display_precinct_id(row["Precinct"]) for row in rows]
+    return (
+        precinct_cross_reference.filter(pl.col("Voting Precinct").is_in(precincts))
+        .sort("Regular Precinct")
+        .to_dicts()
+    )
+
 
 app = dash.Dash(__name__)
 app.title = "Santa Clara County Election Results"
@@ -930,34 +1080,76 @@ app.layout = html.Div(
                 dcc.Graph(
                     id="blueness-scatter",
                     config={"displayModeBar": True},
-                    style={"flex": "1 1 420px", "minWidth": 0},
+                    style={"flex": "1 1 calc(50% - 6px)", "minWidth": "min(100%, 420px)"},
                 ),
                 dcc.Graph(
-                    id="blueness-contour",
+                    id="blueness-heatmap",
                     config={"displayModeBar": True},
-                    style={"flex": "1 1 420px", "minWidth": 0},
+                    style={"flex": "1 1 calc(50% - 6px)", "minWidth": "min(100%, 420px)"},
                 ),
                 dcc.Graph(
                     id="vote-type-chart",
                     config={"displayModeBar": True},
-                    style={"flex": "1 1 420px", "minWidth": 0},
+                    style={"flex": "1 1 calc(50% - 6px)", "minWidth": "min(100%, 420px)"},
+                ),
+                dcc.Graph(
+                    id="precinct-distribution",
+                    config={"displayModeBar": True},
+                    style={"flex": "1 1 calc(50% - 6px)", "minWidth": "min(100%, 420px)"},
                 ),
             ],
             style={"display": "flex", "flexWrap": "wrap", "gap": "12px"},
         ),
-        html.H2("Precinct results", style={"margin": "24px 0 12px"}),
-        dag.AgGrid(
-            id="results-grid",
-            columnDefs=[],
-            rowData=[],
-            defaultColDef={"minWidth": 120},
-            dashGridOptions={
-                "pagination": True,
-                "paginationPageSize": 25,
-                "animateRows": False,
-            },
-            columnSize="responsiveSizeToFit",
-            style={"height": "520px", "width": "100%"},
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.H2("Precinct results", style={"margin": "24px 0 12px"}),
+                        dag.AgGrid(
+                            id="results-grid",
+                            columnDefs=[],
+                            rowData=[],
+                            defaultColDef={"minWidth": 120},
+                            dashGridOptions={
+                                "pagination": True,
+                                "paginationPageSize": 25,
+                                "animateRows": False,
+                            },
+                            columnSize="responsiveSizeToFit",
+                            style={"height": "520px", "width": "100%"},
+                        ),
+                    ],
+                    style={"flex": "1 1 600px", "minWidth": 0},
+                ),
+                html.Div(
+                    [
+                        html.H2("Precinct cross-reference", style={"margin": "24px 0 12px"}),
+                        dag.AgGrid(
+                            id="precinct-cross-reference-grid",
+                            columnDefs=[
+                                {"field": column}
+                                for column in precinct_cross_reference.columns
+                            ],
+                            rowData=contest_cross_reference(default_page),
+                            defaultColDef={
+                                "filter": "agTextColumnFilter",
+                                "floatingFilter": True,
+                                "sortable": True,
+                                "minWidth": 140,
+                            },
+                            dashGridOptions={
+                                "pagination": True,
+                                "paginationPageSize": 25,
+                                "animateRows": False,
+                            },
+                            columnSize="responsiveSizeToFit",
+                            style={"height": "520px", "width": "100%"},
+                        ),
+                    ],
+                    style={"flex": "0 1 340px", "minWidth": "280px"},
+                ),
+            ],
+            style={"display": "flex", "flexWrap": "wrap", "gap": "16px"},
         ),
         html.P(
             "Election results and precinct shape files provided by Santa Clara County "
@@ -974,6 +1166,14 @@ app.layout = html.Div(
         "margin": "0 auto",
     },
 )
+
+
+@app.callback(
+    Output("precinct-cross-reference-grid", "rowData"),
+    Input("contest-selector", "value"),
+)
+def update_precinct_cross_reference(page):
+    return contest_cross_reference(page)
 
 
 @app.callback(
@@ -1012,12 +1212,12 @@ def update_blueness_scatter(page, selected_choice):
 
 
 @app.callback(
-    Output("blueness-contour", "figure"),
+    Output("blueness-heatmap", "figure"),
     Input("contest-selector", "value"),
     Input("map-choice", "value"),
 )
-def update_blueness_contour(page, selected_choice):
-    return build_partisanship_contour(page, selected_choice, BECERRA)
+def update_blueness_heatmap(page, selected_choice):
+    return build_partisanship_heatmap(page, selected_choice, BECERRA)
 
 
 @app.callback(
@@ -1026,6 +1226,15 @@ def update_blueness_contour(page, selected_choice):
 )
 def update_vote_type_chart(page):
     return build_vote_type_chart(page)
+
+
+@app.callback(
+    Output("precinct-distribution", "figure"),
+    Input("contest-selector", "value"),
+    Input("map-choice", "value"),
+)
+def update_precinct_distribution(page, selected_choice):
+    return build_precinct_distribution(page, selected_choice)
 
 
 if __name__ == "__main__":
