@@ -1041,7 +1041,7 @@ app.layout = html.Div(
                 ),
                 html.Div(
                     [
-                        html.Label('Candidate', htmlFor='map-choice'),
+                        html.Label('Select a Candidate', htmlFor='map-choice'),
                         dcc.Dropdown(
                             id='map-choice',
                             options=[
@@ -1056,7 +1056,7 @@ app.layout = html.Div(
                 ),
                 html.Div(
                     [
-                        html.Label('Map style', htmlFor='map-style'),
+                        html.Label('Pick a Map style', htmlFor='map-style'),
                         dcc.Dropdown(
                             id='map-style',
                             options=[
