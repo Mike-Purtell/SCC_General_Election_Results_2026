@@ -1127,8 +1127,13 @@ app.layout = html.Div(
                         dag.AgGrid(
                             id="precinct-cross-reference-grid",
                             columnDefs=[
-                                {"field": column}
-                                for column in precinct_cross_reference.columns
+                                {"field": "Regular Precinct"},
+                                {
+                                    "field": "Voting Precinct",
+                                    "headerName": "Consolidated Voting Precinct",
+                                    "wrapHeaderText": True,
+                                    "autoHeaderHeight": True,
+                                },
                             ],
                             rowData=contest_cross_reference(default_page),
                             defaultColDef={

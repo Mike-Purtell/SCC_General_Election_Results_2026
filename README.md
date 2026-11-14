@@ -17,7 +17,7 @@ Candidate and response cards show vote totals and their share of all votes cast 
 
 Precinct numbers are displayed as four digits, without the source data's three leading zeroes.
 
-The precinct cross-reference grid beside the results table maps regular precincts to voting precincts using `e148 wmr008_votabsregpctxref.pdf`. It shows mappings for the voting precincts in the selected contest's results table, ordered by regular precinct. Use the floating filters to find either precinct number.
+The precinct cross-reference grid beside the results table maps regular precincts to consolidated voting precincts using `e148 wmr008_votabsregpctxref.pdf`. It shows mappings for the voting precincts in the selected contest's results table, ordered by regular precinct. Use the floating filters to find either precinct number.
 
 On first startup, the app extracts the cross-reference from the PDF and saves `precinct_cross_reference.parquet`. Subsequent startups read the Parquet file instead. Delete the Parquet file to rebuild it after updating the PDF.
 
