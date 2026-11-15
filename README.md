@@ -21,9 +21,11 @@ The precinct cross-reference grid beside the results table maps regular precinct
 
 On first startup, the app extracts the cross-reference from the PDF and saves `precinct_cross_reference.parquet`. Subsequent startups read the Parquet file instead. Delete the Parquet file to rebuild it after updating the PDF.
 
+The app also caches the projected precinct geometry in the operating system's temporary folder. The cache is reused on later starts and rebuilt automatically when any geodatabase file changes. Precinct boundaries are kept at their original detail.
+
 Contest names omit the default “Vote For 0” and “Vote For 1” suffixes; higher vote limits remain visible. Selecting a contest centers and zooms the map to its displayed precinct boundaries.
 
-Drag the map to pan. The map sends only the selected contest's precinct boundaries to keep updates responsive; changing contests resets the view to the new precincts.
+Drag the map to pan. The map sends only the selected contest's precinct boundaries. Candidate and map-style changes reuse those exact boundaries; changing contests loads the new boundaries and resets the view.
 
 The map uses a yellow-to-green color scale, with yellow indicating lower shares or turnout and green indicating higher values. It spans the 10th to 90th percentiles of displayed precinct shares (or turnout for the registered voters view). Values outside this range use the endpoint colors; hover values remain unchanged.
 
@@ -31,7 +33,7 @@ Contest results exclude precincts with zero total contest votes from the map, pe
 
 The correlation with Governor-Elect Xavier Becerra scatter plot shows one point per precinct for the selected candidate or response. Its x-axis shows that choice's percentage of total contest votes in the precinct; its y-axis shows Xavier Becerra's governor votes divided by total governor contest votes. Each axis spans its plotted values with a 10% margin on each side. Marker area is proportional to precinct ballots cast. Precincts with zero votes for the selected candidate or response, missing necessary votes, no governor contest votes, or no ballots cast are omitted from the scatter plot and its fit. In the registered voters view, the x-axis shows voter turnout. The dashboard uses Polars rather than pandas.
 
-The scatter plot includes a linear best-fit line and displays its slope, y-intercept, and Pearson correlation coefficient (r). For the fit, each precinct contributes once per vote for the selected candidate or response; in the registered voters view, it contributes once per ballot cast. Each plotted point still represents one precinct. The fit requires at least two distinct x values; otherwise the plot reports that it is unavailable.
+The scatter plot includes a linear best-fit line and displays its slope, y-intercept, and Pearson correlation coefficient (r). For the fit, each precinct contributes once per vote for the selected candidate or response; in the registered voters view, it contributes once per ballot cast. These vote weights are calculated directly rather than expanding the data to one row per vote. Each plotted point still represents one precinct. The fit requires at least two distinct x values; otherwise the plot reports that it is unavailable.
 
 The precinct-density heat map uses the same precincts and axis measures as the scatter plot. Each axis is initially zoomed to its 5th–95th percentile range; outliers remain in the data. It uses a white-to-green color scale to show the number of precincts in each bin, with zero shown in white and each precinct counted once.
 

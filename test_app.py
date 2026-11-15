@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -6,6 +7,8 @@ from unittest.mock import patch
 
 import app
 import polars as pl
+from shapely.geometry import Polygon
+from shapely.wkb import dumps as dump_wkb
 
 
 class PrecinctCrossReferenceTests(unittest.TestCase):
@@ -87,7 +90,172 @@ class PrecinctCrossReferenceTests(unittest.TestCase):
                         app.read_precinct_cross_reference("example.pdf")
 
 
+class PrecinctGeometryCacheTests(unittest.TestCase):
+    def test_exact_cache_is_reused_and_invalidated_when_source_changes(self):
+        cached_geojson = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "id": "0002001",
+                    "properties": {"Precinct": "0002001"},
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[[1, 2], [3, 2], [3, 4], [1, 2]]],
+                    },
+                }
+            ],
+        }
+        with TemporaryDirectory() as directory:
+            geodatabase = Path(directory) / "precincts.gdb"
+            geodatabase.mkdir()
+            source_file = geodatabase / "layer.gdbtable"
+            source_file.write_text("source", encoding="utf-8")
+            cache_path = Path(directory) / "precincts.json"
+            with patch.object(app, "PRECINCT_GEODATABASE", geodatabase), patch.object(
+                app, "PRECINCT_GEOJSON_CACHE", cache_path
+            ):
+                cache_path.write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "source_signature": app.precinct_geodatabase_signature(),
+                            "geojson": cached_geojson,
+                            "bounds": {"0002001": [1, 2, 3, 4]},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with patch.object(
+                    app,
+                    "read_geodatabase_layer",
+                    side_effect=AssertionError("cache should be used"),
+                ):
+                    geojson, bounds = app.load_precinct_geojson()
+                self.assertEqual(geojson, cached_geojson)
+                self.assertEqual(bounds, {"0002001": (1, 2, 3, 4)})
+
+                source_file.write_text("updated source", encoding="utf-8")
+                polygon = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+                with patch.object(
+                    app,
+                    "read_geodatabase_layer",
+                    return_value=(
+                        {"crs": "EPSG:4326"},
+                        None,
+                        [dump_wkb(polygon)],
+                        [[2001]],
+                    ),
+                ) as read_layer:
+                    rebuilt_geojson, rebuilt_bounds = app.load_precinct_geojson()
+                read_layer.assert_called_once()
+                self.assertNotEqual(rebuilt_geojson, cached_geojson)
+                self.assertEqual(rebuilt_bounds["0002001"], (0.0, 0.0, 1.0, 1.0))
+
+
+class WeightedRegressionTests(unittest.TestCase):
+    def test_weighted_fit_matches_vote_expansion(self):
+        slope, intercept, correlation = app.weighted_linear_regression(
+            (1, 3, 7),
+            (2, 5, 4),
+            (2, 3, 1),
+        )
+        self.assertAlmostEqual(slope, 1 / 3)
+        self.assertAlmostEqual(intercept, 17 / 6)
+        self.assertAlmostEqual(correlation, 8 / (260 ** 0.5))
+
+    def test_constant_y_has_zero_correlation(self):
+        slope, intercept, correlation = app.weighted_linear_regression(
+            (1, 3),
+            (2, 2),
+            (1, 4),
+        )
+        self.assertEqual(slope, 0)
+        self.assertEqual(intercept, 2)
+        self.assertEqual(correlation, 0)
+
+
+class PartisanshipCacheTests(unittest.TestCase):
+    def test_scatter_and_heatmap_share_partisanship_data(self):
+        page = "example"
+        governor_page = "governor"
+        contest_rows = (
+            {
+                "Precinct": "0002001",
+                "Contest Total Votes": 10,
+                "Choice": 4,
+                "Ballots Cast": 5,
+                "Turnout": 50,
+            },
+        )
+        governor_rows = (
+            {
+                "Precinct": "0002001",
+                "Contest Total Votes": 10,
+                app.BECERRA: 5,
+            },
+        )
+
+        def contest_data(requested_page, include_zero_votes=False):
+            if requested_page == governor_page:
+                return (app.BECERRA,), governor_rows
+            return ("Choice",), contest_rows
+
+        app.load_partisanship_data.cache_clear()
+        try:
+            with patch.object(
+                app, "CONTESTS", {page: "Example", governor_page: app.GOVERNOR_CONTEST}
+            ), patch.object(
+                app, "CONTEST_PAGES", {app.GOVERNOR_CONTEST: governor_page}
+            ), patch.object(
+                app, "TURNOUT_BY_PRECINCT", {"0002001": {"Ballots Cast": 5}}
+            ), patch.object(app, "load_contest", side_effect=contest_data) as load:
+                first = app.load_partisanship_data(page, "Choice", app.BECERRA)
+                second = app.load_partisanship_data(page, "Choice", app.BECERRA)
+            self.assertEqual(first, second)
+            self.assertEqual(load.call_count, 2)
+        finally:
+            app.load_partisanship_data.cache_clear()
+
+
 class DashboardTests(unittest.TestCase):
+    def test_same_contest_map_update_omits_static_geometry(self):
+        selected_choice = app.default_choices[-1]
+        full_figure, _, _, _ = app.build_dashboard(
+            app.default_page,
+            selected_choice,
+            map_style="white-bg",
+        )
+        figure, _, _, _ = app.build_dashboard(
+            app.default_page,
+            selected_choice,
+            map_style="white-bg",
+            current_figure={"layout": {"uirevision": app.default_page}},
+        )
+        operations = figure.to_plotly_json()["operations"]
+        paths = {tuple(operation["location"]) for operation in operations}
+        updates = {
+            tuple(operation["location"]): operation["params"]["value"]
+            for operation in operations
+        }
+        self.assertIn(("data", 0, "z"), paths)
+        self.assertIn(("data", 0, "customdata"), paths)
+        self.assertIn(("layout", "map", "style"), paths)
+        self.assertNotIn(("data", 0, "geojson"), paths)
+        self.assertEqual(updates[("data", 0, "z")], list(full_figure.data[0].z))
+        self.assertEqual(
+            updates[("data", 0, "customdata")],
+            [list(row) for row in full_figure.data[0].customdata],
+        )
+        self.assertEqual(
+            updates[("layout", "title", "text")],
+            full_figure.layout.title.text,
+        )
+        self.assertEqual(
+            updates[("layout", "map", "style")],
+            full_figure.layout.map.style,
+        )
+
     def test_results_columns_are_equal_and_80_percent_width(self):
         _, _, column_defs, _ = app.build_dashboard(
             app.default_page, app.default_choices[0]

@@ -1,19 +1,34 @@
+import json
+import os
+import re
+import tempfile
 from datetime import datetime
 from functools import lru_cache
-from math import asinh, atan, degrees, isfinite, log2, pi, radians, sinh, tan
+from hashlib import sha256
+from math import (
+    asinh,
+    atan,
+    degrees,
+    fsum,
+    isfinite,
+    log2,
+    pi,
+    radians,
+    sinh,
+    sqrt,
+    tan,
+)
 from pathlib import Path
-import re
 
 import dash
 import dash_ag_grid as dag
-from dash import Input, Output, dcc, html
+from dash import Input, Output, Patch, State, dcc, html
 import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
 from pypdf import PdfReader
 from pyogrio.raw import read as read_geodatabase_layer
 from pyproj import Transformer
-from scipy.stats import linregress
 from shapely.geometry import shape
 from shapely.wkb import loads as load_wkb
 
@@ -23,6 +38,9 @@ SOURCE_DATA = ROOT / 'detail_2026_11_13.xlsx'
 PRECINCT_CROSS_REFERENCE = ROOT / 'e148 wmr008_votabsregpctxref.pdf'
 PRECINCT_CROSS_REFERENCE_PARQUET = ROOT / 'precinct_cross_reference.parquet'
 PRECINCT_GEODATABASE = ROOT / 'E148_Consolidated_Precinct.gdb'
+PRECINCT_GEOJSON_CACHE = Path(tempfile.gettempdir()) / (
+    f'scc_election_precinct_geojson_{sha256(str(ROOT).encode()).hexdigest()[:16]}.json'
+)
 PRECINCT_LAYER = 'E148_Consolidated_Precinct'
 PRECINCT_ID_FIELD = 'VPCT'
 PRECINCT_COLOR_SCALE = ['#ffff00', '#008000']
@@ -181,7 +199,35 @@ def project_coordinates(coordinates, transformer):
     return [project_coordinates(value, transformer) for value in coordinates]
 
 
+def precinct_geodatabase_signature():
+    signature = []
+    for path in sorted(PRECINCT_GEODATABASE.rglob('*')):
+        if path.is_file():
+            stat = path.stat()
+            signature.append(
+                {
+                    'path': path.relative_to(PRECINCT_GEODATABASE).as_posix(),
+                    'size': stat.st_size,
+                    'mtime_ns': stat.st_mtime_ns,
+                }
+            )
+    return signature
+
+
 def load_precinct_geojson():
+    source_signature = precinct_geodatabase_signature()
+    if PRECINCT_GEOJSON_CACHE.exists():
+        cached = json.loads(PRECINCT_GEOJSON_CACHE.read_text(encoding='utf-8'))
+        if (
+            cached.get('version') == 1
+            and cached.get('source_signature') == source_signature
+        ):
+            bounds = {
+                precinct: tuple(bound)
+                for precinct, bound in cached['bounds'].items()
+            }
+            return cached['geojson'], bounds
+
     metadata, _, geometries, fields = read_geodatabase_layer(
         str(PRECINCT_GEODATABASE),
         layer=PRECINCT_LAYER,
@@ -218,10 +264,29 @@ def load_precinct_geojson():
             }
         )
 
-    return {'type': 'FeatureCollection', 'features': features}
+    geojson = {'type': 'FeatureCollection', 'features': features}
+    bounds = {
+        feature['properties']['Precinct']: shape(feature['geometry']).bounds
+        for feature in features
+    }
+    cache = {
+        'version': 1,
+        'source_signature': source_signature,
+        'geojson': geojson,
+        'bounds': bounds,
+    }
+    temporary_path = PRECINCT_GEOJSON_CACHE.with_name(
+        f'{PRECINCT_GEOJSON_CACHE.name}.{os.getpid()}.tmp'
+    )
+    temporary_path.write_text(
+        json.dumps(cache, separators=(',', ':')),
+        encoding='utf-8',
+    )
+    temporary_path.replace(PRECINCT_GEOJSON_CACHE)
+    return geojson, bounds
 
 
-PRECINCT_GEOJSON = load_precinct_geojson()
+PRECINCT_GEOJSON, PRECINCT_BOUNDS = load_precinct_geojson()
 PRECINCT_IDS = {
     feature['properties']['Precinct'] for feature in PRECINCT_GEOJSON['features']
 }
@@ -234,10 +299,6 @@ PRECINCT_LABELS = {
         feature['properties']['label_lon'],
         feature['properties']['label_lat'],
     )
-    for feature in PRECINCT_GEOJSON['features']
-}
-PRECINCT_BOUNDS = {
-    feature['properties']['Precinct']: shape(feature['geometry']).bounds
     for feature in PRECINCT_GEOJSON['features']
 }
 
@@ -330,6 +391,27 @@ def load_contest(page, include_zero_votes=False):
     return choices, tuple(rows)
 
 
+@lru_cache(maxsize=32)
+def load_contest_map_geometry(page):
+    _, rows = load_contest(page)
+    map_precincts = tuple(
+        row['Precinct']
+        for row in rows
+        if row['Precinct'] in PRECINCT_FEATURES
+    )
+    geojson = {
+        'type': 'FeatureCollection',
+        'features': [PRECINCT_FEATURES[precinct] for precinct in map_precincts],
+    }
+    center, zoom = precinct_map_view(map_precincts)
+    label_ids = tuple(
+        row['Precinct']
+        for row in rows
+        if row['Precinct'] in PRECINCT_LABELS
+    )
+    return geojson, center, zoom, label_ids
+
+
 def format_count(value):
     return f'{value:,.0f}'
 
@@ -350,7 +432,12 @@ def metric_card(label, value):
     )
 
 
-def build_dashboard(page, selected_choice, map_style='open-street-map'):
+def build_dashboard(
+    page,
+    selected_choice,
+    map_style='open-street-map',
+    current_figure=None,
+):
     if map_style not in MAP_STYLES:
         raise ValueError(f'Unsupported map style: {map_style}')
     contest = CONTESTS[page]
@@ -457,79 +544,102 @@ def build_dashboard(page, selected_choice, map_style='open-street-map'):
         .otherwise(pl.col('Precinct'))
         .alias('Display Precinct')
     )
-    map_precincts = [
-        row['Precinct'] for row in map_rows if row['Precinct'] in PRECINCT_FEATURES
-    ]
-    contest_geojson = {
-        'type': 'FeatureCollection',
-        'features': [PRECINCT_FEATURES[precinct] for precinct in map_precincts],
-    }
-    center, zoom = precinct_map_view(map_precincts)
-    figure = px.choropleth_map(
-        map_frame,
-        geojson=contest_geojson,
-        locations='Precinct',
-        featureidkey='properties.Precinct',
-        color='Map Value',
-        range_color=color_range,
-        color_continuous_scale=PRECINCT_COLOR_SCALE,
-        opacity=0.5,
-        map_style=map_style,
-        center=center,
-        zoom=zoom,
-        custom_data=[
-            'Choice',
-            'Choice Votes',
-            'Vote Percentage',
-            'Contest Total Votes',
-            'Turnout',
-            'Display Precinct',
-            'Registered Voters',
-        ],
-    )
-    figure.update_traces(
-        hovertemplate=(
-            '<b>Consolidated Precinct %{customdata[5]}</b><br>'
-            'Ballots Cast: %{customdata[1]:,.0f}<br>'
-            'Registered Voters: %{customdata[6]:,.0f}<br>'
-            'Turnout: %{customdata[4]:.1f}%<extra></extra>'
+    if (
+        current_figure
+        and current_figure.get('layout', {}).get('uirevision') == page
+    ):
+        figure = Patch()
+        figure['data'][0]['z'] = map_frame['Map Value'].to_list()
+        figure['data'][0]['customdata'] = [
+            [
+                row[column]
+                for column in (
+                    'Choice',
+                    'Choice Votes',
+                    'Vote Percentage',
+                    'Contest Total Votes',
+                    'Turnout',
+                    'Display Precinct',
+                    'Registered Voters',
+                )
+            ]
+            for row in map_frame.to_dicts()
+        ]
+        figure['layout']['map']['style'] = map_style
+        figure['layout']['title']['text'] = (
+            f'{display_contest_name(contest)} — {selected_choice}'
+        )
+        figure['layout']['coloraxis']['colorbar']['title']['text'] = (
+            selected_choice
             if contest == REGISTERED_VOTERS
-            else (
+            else f'{selected_choice} share'
+        )
+        if color_range is not None:
+            figure['layout']['coloraxis']['cmin'] = color_range[0]
+            figure['layout']['coloraxis']['cmax'] = color_range[1]
+    else:
+        contest_geojson, center, zoom, label_ids = load_contest_map_geometry(page)
+        figure = px.choropleth_map(
+            map_frame,
+            geojson=contest_geojson,
+            locations='Precinct',
+            featureidkey='properties.Precinct',
+            color='Map Value',
+            range_color=color_range,
+            color_continuous_scale=PRECINCT_COLOR_SCALE,
+            opacity=0.5,
+            map_style=map_style,
+            center=center,
+            zoom=zoom,
+            custom_data=[
+                'Choice',
+                'Choice Votes',
+                'Vote Percentage',
+                'Contest Total Votes',
+                'Turnout',
+                'Display Precinct',
+                'Registered Voters',
+            ],
+        )
+        figure.update_traces(
+            hovertemplate=(
                 '<b>Consolidated Precinct %{customdata[5]}</b><br>'
-                '%{customdata[0]}: %{customdata[1]:,.0f} votes<br>'
-                'Precinct votes: %{customdata[3]:,.0f}<br>'
-                'Vote percentage: %{customdata[2]:.1f}%<br>'
-                'Precinct turnout: %{customdata[4]:.1f}%'
-                '<extra></extra>'
+                'Ballots Cast: %{customdata[1]:,.0f}<br>'
+                'Registered Voters: %{customdata[6]:,.0f}<br>'
+                'Turnout: %{customdata[4]:.1f}%<extra></extra>'
+                if contest == REGISTERED_VOTERS
+                else (
+                    '<b>Consolidated Precinct %{customdata[5]}</b><br>'
+                    '%{customdata[0]}: %{customdata[1]:,.0f} votes (%{customdata[2]:.1f}%)<br>'
+                    'Precinct votes: %{customdata[3]:,.0f}<br>'
+                    'Precinct turnout: %{customdata[4]:.1f}%'
+                    '<extra></extra>'
+                )
             )
         )
-    )
-    label_ids = [
-        row['Precinct'] for row in map_rows if row['Precinct'] in PRECINCT_LABELS
-    ]
-    figure.add_trace(go.Scattermap(
-        lon=[PRECINCT_LABELS[precinct][0] for precinct in label_ids],
-        lat=[PRECINCT_LABELS[precinct][1] for precinct in label_ids],
-        text=[display_precinct_id(precinct) for precinct in label_ids],
-        mode='text',
-        textfont={'size': 10, 'color': '#111827'},
-        hoverinfo='skip',
-        showlegend=False,
-    ))
-    figure.update_layout(
-        title=f'{display_contest_name(contest)} — {selected_choice}',
-        margin={'l': 0, 'r': 0, 't': 48, 'b': 0},
-        height=620,
-        coloraxis_colorbar={
-            'title': selected_choice
-            if contest == REGISTERED_VOTERS
-            else f'{selected_choice} share',
-            'ticksuffix': '%',
-        },
-        paper_bgcolor='white',
-        dragmode='pan',
-        uirevision=page,
-    )
+        figure.add_trace(go.Scattermap(
+            lon=[PRECINCT_LABELS[precinct][0] for precinct in label_ids],
+            lat=[PRECINCT_LABELS[precinct][1] for precinct in label_ids],
+            text=[display_precinct_id(precinct) for precinct in label_ids],
+            mode='text',
+            textfont={'size': 10, 'color': '#111827'},
+            hoverinfo='skip',
+            showlegend=False,
+        ))
+        figure.update_layout(
+            title=f'{display_contest_name(contest)} — {selected_choice}',
+            margin={'l': 0, 'r': 0, 't': 48, 'b': 0},
+            height=620,
+            coloraxis_colorbar={
+                'title': selected_choice
+                if contest == REGISTERED_VOTERS
+                else f'{selected_choice} share',
+                'ticksuffix': '%',
+            },
+            paper_bgcolor='white',
+            dragmode='pan',
+            uirevision=page,
+        )
 
     grid_columns = list(grid_rows[0]) if grid_rows else []
     column_header_names = {
@@ -587,6 +697,7 @@ def density_axis_range(values):
     return [lower, upper]
 
 
+@lru_cache(maxsize=32)
 def load_partisanship_data(page, selected_choice, governor_candidate):
     contest = CONTESTS[page]
     choices, rows = load_contest(page)
@@ -652,12 +763,50 @@ def load_partisanship_data(page, selected_choice, governor_candidate):
     return (
         contest,
         selected_choice,
-        vote_percentages,
-        governor_shares,
-        ballot_counts,
-        choice_counts,
-        hover_data,
+        tuple(vote_percentages),
+        tuple(governor_shares),
+        tuple(ballot_counts),
+        tuple(choice_counts),
+        tuple(tuple(row) for row in hover_data),
     )
+
+
+def weighted_linear_regression(x_values, y_values, weights):
+    if (
+        not x_values
+        or len(x_values) != len(y_values)
+        or len(x_values) != len(weights)
+        or any(weight <= 0 for weight in weights)
+    ):
+        raise ValueError(
+            'Weighted regression requires matching values and positive weights'
+        )
+
+    weight_total = fsum(weights)
+    x_mean = (
+        fsum(x * weight for x, weight in zip(x_values, weights, strict=True))
+        / weight_total
+    )
+    y_mean = (
+        fsum(y * weight for y, weight in zip(y_values, weights, strict=True))
+        / weight_total
+    )
+    ss_xx = fsum(
+        weight * (x - x_mean) ** 2
+        for x, weight in zip(x_values, weights, strict=True)
+    )
+    ss_yy = fsum(
+        weight * (y - y_mean) ** 2
+        for y, weight in zip(y_values, weights, strict=True)
+    )
+    ss_xy = fsum(
+        weight * (x - x_mean) * (y - y_mean)
+        for x, y, weight in zip(x_values, y_values, weights, strict=True)
+    )
+    slope = ss_xy / ss_xx
+    intercept = y_mean - slope * x_mean
+    correlation = ss_xy / sqrt(ss_xx * ss_yy) if ss_yy else 0.0
+    return slope, intercept, max(-1.0, min(1.0, correlation))
 
 
 def build_partisanship_scatter(page, selected_choice, governor_candidate, color):
@@ -704,28 +853,15 @@ def build_partisanship_scatter(page, selected_choice, governor_candidate, color)
         hovertemplate=hovertemplate,
     ))
     if len(vote_percentages) >= 2 and min(vote_percentages) != max(vote_percentages):
-        vote_data = (
-            pl.DataFrame(
-                {
-                    'vote_percentage': vote_percentages,
-                    'governor_share': governor_shares,
-                    'votes': choice_counts,
-                }
-            )
-            .select(
-                pl.col('vote_percentage').repeat_by('votes'),
-                pl.col('governor_share').repeat_by('votes'),
-            )
-            .explode('vote_percentage', 'governor_share')
-        )
-        regression = linregress(
-            vote_data['vote_percentage'].to_numpy(),
-            vote_data['governor_share'].to_numpy(),
+        slope, intercept, rvalue = weighted_linear_regression(
+            vote_percentages,
+            governor_shares,
+            choice_counts,
         )
         line_x = [min(vote_percentages), max(vote_percentages)]
         figure.add_trace(go.Scatter(
             x=line_x,
-            y=[regression.slope * x + regression.intercept for x in line_x],
+            y=[slope * x + intercept for x in line_x],
             mode='lines',
             name='Best fit',
             line={'color': color, 'width': 2},
@@ -733,7 +869,7 @@ def build_partisanship_scatter(page, selected_choice, governor_candidate, color)
         ))
         figure.add_annotation(
             x=line_x[-1],
-            y=regression.slope * line_x[-1] + regression.intercept,
+            y=slope * line_x[-1] + intercept,
             text='Best Fit',
             font={'color': color},
             showarrow=False,
@@ -741,12 +877,12 @@ def build_partisanship_scatter(page, selected_choice, governor_candidate, color)
             yanchor='bottom',
         )
         correlation = (
-            f'{regression.rvalue:.3f}' if isfinite(regression.rvalue) else 'undefined'
+            f'{rvalue:.3f}' if isfinite(rvalue) else 'undefined'
         )
         subtitle = (
             f'| r: {correlation} | '
-            f'Slope: {regression.slope:.3f} | '
-            f'Y-intercept: {regression.intercept:.3f}'
+            f'Slope: {slope:.3f} | '
+            f'Y-intercept: {intercept:.3f}'
         )
     else:
         subtitle = 'Best fit unavailable: at least two distinct x values required'
@@ -1214,9 +1350,10 @@ def update_map_choices(page):
     Input('contest-selector', 'value'),
     Input('map-choice', 'value'),
     Input('map-style', 'value'),
+    State('precinct-map', 'figure'),
 )
-def update_dashboard(page, selected_choice, map_style):
-    return build_dashboard(page, selected_choice, map_style)
+def update_dashboard(page, selected_choice, map_style, current_figure):
+    return build_dashboard(page, selected_choice, map_style, current_figure)
 
 
 @app.callback(
