@@ -34,7 +34,7 @@ from shapely.wkb import loads as load_wkb
 
 
 ROOT = Path(__file__).resolve().parent
-SOURCE_DATA = ROOT / 'detail_2026_11_13.xlsx'
+SOURCE_DATA = ROOT / 'detail_2026_11_14.xlsx'
 PRECINCT_CROSS_REFERENCE = ROOT / 'e148 wmr008_votabsregpctxref.pdf'
 PRECINCT_CROSS_REFERENCE_PARQUET = ROOT / 'precinct_cross_reference.parquet'
 PRECINCT_GEODATABASE = ROOT / 'E148_Consolidated_Precinct.gdb'
@@ -1148,13 +1148,14 @@ app.title = 'Santa Clara County Election Results'
 app.layout = html.Div(
     [
         html.H1(
-            'General Election of November 3, 2026: Santa Clara County',
+            'General Election Results for Santa Clara County, November 2026',
             style={'margin': '0 0 6px'}
         ),
         html.P(
             [
-                'These results were released by the Santa Clara County '
-                f'Registrar of Voters on {results_date_label} ',
+                'Partial election results released by the Santa Clara County '
+                f'Registrar of Voters on {results_date_label}. '
+                'There are 5,000 uncounted votes.',
             ],
             style={'color': '#475569', 'margin': '0 0 20px'},
         ),
