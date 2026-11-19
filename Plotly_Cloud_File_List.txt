@@ -1,0 +1,11 @@
+These files and folders must be uploaded to Plotly Cloud for app deployment.
+
+Folders:
+	assets
+	E148_Consolidated_Precinct.gdb
+
+Files:
+	app.py
+	requirements.txt
+    precinct_cross_reference.parquet
+    detail.xlsx  (in some cases file name includes a date)
