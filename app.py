@@ -32,9 +32,9 @@ from pyproj import Transformer
 from shapely.geometry import shape
 from shapely.wkb import loads as load_wkb
 
-
+VOTES_REMAINING = 1500
 ROOT = Path(__file__).resolve().parent
-SOURCE_DATA = ROOT / 'detail_2026_11_18.xlsx'
+SOURCE_DATA = ROOT / 'detail_2026_11_20.xlsx'
 PRECINCT_CROSS_REFERENCE = ROOT / 'e148 wmr008_votabsregpctxref.pdf'
 PRECINCT_CROSS_REFERENCE_PARQUET = ROOT / 'precinct_cross_reference.parquet'
 PRECINCT_GEODATABASE = ROOT / 'E148_Consolidated_Precinct.gdb'
@@ -1155,7 +1155,7 @@ app.layout = html.Div(
             [
                 f'Election results released on {results_date_label} by '
                 f'the Santa Clara County Registrar of Voters. '
-                '2,000 votes remain to be counted.',
+                f'{VOTES_REMAINING:,d} votes remain to be counted.',
             ],
             style={'color': '#475569', 'margin': '0 0 20px'},
         ),
