@@ -9,7 +9,7 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-Open the local address printed by Dash (usually `http://127.0.0.1:8050`). Choose a contest and a candidate or response to color the precinct map by vote share. Use the map style dropdown to select a built-in Plotly basemap; the default is OpenStreetMap. Most basemaps require an internet connection; white-bg does not. Precinct numbers appear on the map and in scatter plot hover details. The map hover shows precinct votes and turnout; summary cards and the precinct results grid update with the selected contest.
+Open the local address printed by Dash (usually `http://127.0.0.1:8050`). Choose a candidate from any contest to update the contest and color the precinct map by vote share. Repeated candidate names include the contest name to distinguish them. Selecting a contest instead selects its first candidate or response. Use Other contest choices to select among all choices in that contest, including ballot-measure Yes/No responses, write-ins, and Voter Turnout in the registered voters view. Use the map style dropdown to select a built-in Plotly basemap; the default is OpenStreetMap. Most basemaps require an internet connection; white-bg does not. Precinct numbers appear on the map and in scatter plot hover details. The map hover shows precinct votes and turnout; summary cards and the precinct results grid update with the selected contest.
 
 The subtitle includes the registrar's estimated unprocessed ballot total, linked to its source and labeled with the estimate's update time. This is a fixed snapshot, not a live feed; update `UNPROCESSED_BALLOTS` and `UNPROCESSED_BALLOTS_UPDATED` in `app.py` when incorporating a newer estimate.
 

@@ -11,6 +11,139 @@ from shapely.geometry import Polygon
 from shapely.wkb import dumps as dump_wkb
 
 
+class SelectionTests(unittest.TestCase):
+    def test_candidate_controls_precede_contest_and_are_stacked(self):
+        controls = app.app.layout.children[2].children
+        candidate_column, contest_column = controls[:2]
+        self.assertEqual(candidate_column.children[1].id, "map-choice")
+        response_container = candidate_column.children[2]
+        self.assertEqual(response_container.id, "contest-response-container")
+        self.assertEqual(response_container.children[1].id, "contest-response")
+        self.assertEqual(contest_column.children[1].id, "contest-selector")
+
+    def test_only_duplicate_names_include_the_contest(self):
+        contests = {"1": "First (Vote For 1)", "2": "Second (Vote For 1)"}
+        choices = {"1": (("Alice", "Carol"), ()), "2": (("Bob", "Carol"), ())}
+        with patch.object(app, "CONTESTS", contests), patch.object(
+            app, "load_contest", side_effect=choices.get
+        ):
+            options = app.all_choice_options()
+        self.assertEqual(
+            {option["label"]: json.loads(option["value"]) for option in options},
+            {
+                "Alice": ["1", "Alice"],
+                "Bob": ["2", "Bob"],
+                "Carol — First": ["1", "Carol"],
+                "Carol — Second": ["2", "Carol"],
+            },
+        )
+
+    def test_options_cover_named_candidates_only(self):
+        options = app.choice_options
+        values = [option["value"] for option in options]
+        expected = {
+            app.choice_value(page, choice)
+            for page in app.CONTESTS
+            for choice in app.load_contest(page)[0]
+            if app.is_candidate(choice)
+        }
+        self.assertEqual(set(values), expected)
+        self.assertEqual(len(values), len(expected))
+        for choice in ("Yes", "No", "Write-in", "Voter Turnout"):
+            self.assertFalse(app.is_candidate(choice))
+            self.assertNotIn(choice, [json.loads(value)[1] for value in values])
+
+    def test_selecting_candidate_and_contest_updates_the_other_selector(self):
+        page = next(
+            page for page in app.CONTESTS
+            if page != app.default_page
+            and len([c for c in app.load_contest(page)[0] if app.is_candidate(c)]) > 1
+        )
+        choices = app.load_contest(page)[0]
+        selected = app.choice_value(page, next(c for c in choices[1:] if app.is_candidate(c)))
+        initial = app.choice_value(app.default_page, app.default_choices[0])
+        client = app.app.server.test_client()
+        outputs = [
+            {"id": "contest-selector", "property": "value"},
+            {"id": "map-choice", "property": "value"},
+            {"id": "contest-response", "property": "options"},
+            {"id": "contest-response", "property": "value"},
+            {"id": "contest-response-container", "property": "style"},
+        ]
+        callback = ".." + "...".join(f"{o['id']}.{o['property']}" for o in outputs) + ".."
+
+        def update(contest, candidate, response_value, changed):
+            response = client.post(
+                "/_dash-update-component",
+                json={
+                    "output": callback,
+                    "outputs": outputs,
+                    "inputs": [
+                        {"id": "contest-selector", "property": "value", "value": contest},
+                        {"id": "map-choice", "property": "value", "value": candidate},
+                        {"id": "contest-response", "property": "value", "value": response_value},
+                    ],
+                    "state": [],
+                    "changedPropIds": [changed],
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            return response.get_json()["response"]
+
+        result = update(app.default_page, selected, None, "map-choice.value")
+        self.assertEqual(result["contest-selector"]["value"], page)
+        self.assertEqual(result["contest-response"]["value"], json.loads(selected)[1])
+        self.assertEqual(
+            [option["value"] for option in result["contest-response"]["options"]],
+            list(choices),
+        )
+        result = update(page, initial, None, "contest-selector.value")
+        self.assertEqual(result["map-choice"]["value"], app.choice_value(page, choices[0]))
+        self.assertEqual(result["contest-response"]["value"], choices[0])
+        result = update(page, selected, choices[0], "contest-response.value")
+        self.assertEqual(result["map-choice"]["value"], app.choice_value(page, choices[0]))
+
+        measure = next(
+            page for page in app.CONTESTS if app.load_contest(page)[0] == ("Yes", "No")
+        )
+        result = update(measure, initial, None, "contest-selector.value")
+        self.assertIsNone(result["map-choice"]["value"])
+        self.assertEqual(result["contest-response"]["value"], "Yes")
+        self.assertEqual(
+            result["contest-response"]["options"],
+            [{"label": "Yes", "value": "Yes"}, {"label": "No", "value": "No"}],
+        )
+        result = update(measure, None, "No", "contest-response.value")
+        self.assertIsNone(result["map-choice"]["value"])
+        mayor_page = next(
+            page for page in app.CONTESTS
+            if "Kathy Watanabe" in app.load_contest(page)[0]
+        )
+        result = update(
+            app.default_page,
+            app.choice_value(mayor_page, "Kathy Watanabe"),
+            None,
+            "map-choice.value",
+        )
+        self.assertEqual(result["contest-selector"]["value"], mayor_page)
+        self.assertEqual(result["contest-response"]["value"], "Kathy Watanabe")
+        choices = {option["value"] for option in result["contest-response"]["options"]}
+        self.assertTrue(
+            {"Kathy Watanabe", "Karen Hardy", "David Kertes", "Kevin Park"} <= choices
+        )
+
+    def test_dashboard_receives_selected_choice_name(self):
+        page = app.default_page
+        choice = app.default_choices[-1]
+        with patch.object(app, "build_dashboard", return_value="result") as build:
+            result = app.update_dashboard(page, app.choice_value(page, choice), None, "white-bg", None)
+        self.assertEqual(result, "result")
+        build.assert_called_once_with(page, choice, "white-bg", None)
+        with patch.object(app, "build_dashboard", return_value="result") as build:
+            app.update_dashboard(page, None, "No", "white-bg", None)
+        build.assert_called_once_with(page, "No", "white-bg", None)
+
+
 class PrecinctCrossReferenceTests(unittest.TestCase):
     def test_parquet_cache_is_created_and_reused(self):
         frame = pl.DataFrame(

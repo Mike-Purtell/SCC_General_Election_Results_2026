@@ -2,6 +2,7 @@ import json
 import os
 import re
 import tempfile
+from collections import Counter
 from datetime import datetime
 from functools import lru_cache
 from hashlib import sha256
@@ -1128,6 +1129,51 @@ def build_precinct_distribution(page, selected_choice):
 
 default_page = CONTEST_PAGES.get('Governor (Vote For 1)', next(iter(CONTESTS)))
 default_choices, _ = load_contest(default_page)
+
+
+def choice_value(page, choice):
+    return json.dumps([page, choice])
+
+
+def is_candidate(choice):
+    return choice.casefold() not in {'yes', 'no', 'write-in', 'voter turnout'}
+
+
+def all_choice_options():
+    choices = [
+        (page, contest, choice)
+        for page, contest in CONTESTS.items()
+        for choice in load_contest(page)[0]
+        if is_candidate(choice)
+    ]
+    counts = Counter(choice for _, _, choice in choices)
+    options = [
+        {
+            'label': (
+                f'{choice} — {display_contest_name(contest)}'
+                if counts[choice] > 1 else choice
+            ),
+            'value': choice_value(page, choice),
+        }
+        for page, contest, choice in choices
+    ]
+    return sorted(options, key=lambda option: option['label'].casefold())
+
+
+choice_options = all_choice_options()
+
+
+def response_options(page):
+    return [
+        {'label': choice, 'value': choice}
+        for choice in load_contest(page)[0]
+    ]
+
+
+def response_style(options):
+    return {'marginTop': '12px', 'display': 'block' if options else 'none'}
+
+
 precinct_cross_reference = load_precinct_cross_reference(
     PRECINCT_CROSS_REFERENCE, PRECINCT_CROSS_REFERENCE_PARQUET
 )
@@ -1163,6 +1209,31 @@ app.layout = html.Div(
             [
                 html.Div(
                     [
+                        html.Label('Select a Candidate', htmlFor='map-choice'),
+                        dcc.Dropdown(
+                            id='map-choice',
+                            options=choice_options,
+                            value=choice_value(default_page, default_choices[0]),
+                            clearable=False,
+                        ),
+                        html.Div(
+                            [
+                                html.Label('Other contest choices', htmlFor='contest-response'),
+                                dcc.Dropdown(
+                                    id='contest-response',
+                                    options=response_options(default_page),
+                                    value=default_choices[0],
+                                    clearable=False,
+                                ),
+                            ],
+                            id='contest-response-container',
+                            style=response_style(response_options(default_page)),
+                        ),
+                    ],
+                    style={'flex': '1', 'minWidth': '220px'},
+                ),
+                html.Div(
+                    [
                         html.Label('Contest', htmlFor='contest-selector'),
                         dcc.Dropdown(
                             id='contest-selector',
@@ -1175,21 +1246,6 @@ app.layout = html.Div(
                         ),
                     ],
                     style={'flex': '2', 'minWidth': '280px'},
-                ),
-                html.Div(
-                    [
-                        html.Label('Select a Candidate', htmlFor='map-choice'),
-                        dcc.Dropdown(
-                            id='map-choice',
-                            options=[
-                                {'label': choice, 'value': choice}
-                                for choice in default_choices
-                            ],
-                            value=default_choices[0],
-                            clearable=False,
-                        ),
-                    ],
-                    style={'flex': '1', 'minWidth': '220px'},
                 ),
                 html.Div(
                     [
@@ -1331,16 +1387,46 @@ def update_precinct_cross_reference(page):
 
 
 @app.callback(
-    Output('map-choice', 'options'),
+    Output('contest-selector', 'value'),
     Output('map-choice', 'value'),
+    Output('contest-response', 'options'),
+    Output('contest-response', 'value'),
+    Output('contest-response-container', 'style'),
     Input('contest-selector', 'value'),
+    Input('map-choice', 'value'),
+    Input('contest-response', 'value'),
+    prevent_initial_call=True,
 )
-def update_map_choices(page):
+def update_selection(page, selected_value, response):
+    if dash.ctx.triggered_id == 'map-choice':
+        if selected_value is None:
+            return (dash.no_update,) * 5
+        selected_page, choice = json.loads(selected_value)
+        options = response_options(selected_page)
+        return selected_page, dash.no_update, options, choice, response_style(options)
+    if dash.ctx.triggered_id == 'contest-response':
+        if response is None:
+            return (dash.no_update,) * 5
+        candidate = choice_value(page, response) if is_candidate(response) else None
+        return dash.no_update, candidate, dash.no_update, dash.no_update, dash.no_update
     choices, _ = load_contest(page)
+    options = response_options(page)
+    first = choices[0]
     return (
-        [{'label': choice, 'value': choice} for choice in choices],
-        choices[0],
+        dash.no_update,
+        choice_value(page, first) if is_candidate(first) else None,
+        options,
+        first,
+        response_style(options),
     )
+
+
+def selected_choice_name(page, selected_value, response):
+    if selected_value is not None:
+        return json.loads(selected_value)[1]
+    if response is not None:
+        return response
+    return load_contest(page)[0][0]
 
 
 @app.callback(
@@ -1350,29 +1436,38 @@ def update_map_choices(page):
     Output('results-grid', 'rowData'),
     Input('contest-selector', 'value'),
     Input('map-choice', 'value'),
+    Input('contest-response', 'value'),
     Input('map-style', 'value'),
     State('precinct-map', 'figure'),
 )
-def update_dashboard(page, selected_choice, map_style, current_figure):
-    return build_dashboard(page, selected_choice, map_style, current_figure)
+def update_dashboard(page, selected_choice, response, map_style, current_figure):
+    return build_dashboard(
+        page, selected_choice_name(page, selected_choice, response), map_style, current_figure
+    )
 
 
 @app.callback(
     Output('blueness-scatter', 'figure'),
     Input('contest-selector', 'value'),
     Input('map-choice', 'value'),
+    Input('contest-response', 'value'),
 )
-def update_blueness_scatter(page, selected_choice):
-    return build_partisanship_scatter(page, selected_choice, BECERRA, '#2563eb')
+def update_blueness_scatter(page, selected_choice, response):
+    return build_partisanship_scatter(
+        page, selected_choice_name(page, selected_choice, response), BECERRA, '#2563eb'
+    )
 
 
 @app.callback(
     Output('blueness-heatmap', 'figure'),
     Input('contest-selector', 'value'),
     Input('map-choice', 'value'),
+    Input('contest-response', 'value'),
 )
-def update_blueness_heatmap(page, selected_choice):
-    return build_partisanship_heatmap(page, selected_choice, BECERRA)
+def update_blueness_heatmap(page, selected_choice, response):
+    return build_partisanship_heatmap(
+        page, selected_choice_name(page, selected_choice, response), BECERRA
+    )
 
 
 @app.callback(
@@ -1387,9 +1482,10 @@ def update_vote_type_chart(page):
     Output('precinct-distribution', 'figure'),
     Input('contest-selector', 'value'),
     Input('map-choice', 'value'),
+    Input('contest-response', 'value'),
 )
-def update_precinct_distribution(page, selected_choice):
-    return build_precinct_distribution(page, selected_choice)
+def update_precinct_distribution(page, selected_choice, response):
+    return build_precinct_distribution(page, selected_choice_name(page, selected_choice, response))
 
 
 if __name__ == '__main__':
