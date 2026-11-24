@@ -33,9 +33,9 @@ from pyproj import Transformer
 from shapely.geometry import shape
 from shapely.wkb import loads as load_wkb
 
-VOTES_REMAINING = 1500
+VOTES_REMAINING = 1400
 ROOT = Path(__file__).resolve().parent
-SOURCE_DATA = ROOT / 'detail_2026_11_20.xlsx'
+SOURCE_DATA = ROOT / 'detail_2026_11_23.xlsx'
 PRECINCT_CROSS_REFERENCE = ROOT / 'e148 wmr008_votabsregpctxref.pdf'
 PRECINCT_CROSS_REFERENCE_PARQUET = ROOT / 'precinct_cross_reference.parquet'
 PRECINCT_GEODATABASE = ROOT / 'E148_Consolidated_Precinct.gdb'
